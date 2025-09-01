@@ -2,8 +2,8 @@ CXX = g++
 CXXFLAGS = -std=c++17 -Wall -O2 -Iglad/include
 LDFLAGS = -lglfw -ldl -lGL -lm
 
-TARGET = blackhole_gl
-SRC = blackhole.cpp glad/src/glad.c
+TARGET = orbit
+SRC = orbit.cpp glad/src/glad.c
 
 all: $(TARGET)
 
