@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
+#include <algorithm>
 
 using namespace std;
 
@@ -17,13 +18,18 @@ struct Vec2 {
 struct Particle {
     Vec2 pos;
     Vec2 vel;
+    vector<Vec2> trail;
+    float temp;
+    size_t maxTrailLength = 50;
 };
 
 const int width = 800, height = 600;
 const float G = 200.0f, M = 2000.0f;
-const int numParticles = 200;
+const int numParticles = 100;
 const float centerX = (float)width / 2;
 const float centerY = (float)height / 2;
+const float blackHoleRadius = 15.0f;
+const float accretionDiskRadius = 80.0f;
 
 // Gravitational acceleration toward origin (black hole at center)
 Vec2 gravity(Vec2 pos, float G, float M) {
@@ -36,13 +42,63 @@ Vec2 gravity(Vec2 pos, float G, float M) {
     return { -F * dx / r, -F * dy / r }; // we create an acceleration vecotr towards the blackhole
 }
 
+float calcTemp(const Particle& p) {
+    float speed = sqrt(p.vel.x * p.vel.x + p.vel.y * p.vel.y);
+    float dist = sqrt((p.pos.x - centerX) * (p.pos.x - centerX) + (p.pos.y - centerY) * (p.pos.y - centerY));
+
+    float temp = speed * 0.01f + (200.0f / max(dist, 10.0f));
+
+    return min(temp, 3.0f);
+}
+
 // Update particle
 void updateParticle(Particle &p, float dt, float G, float M) {
+
+    p.trail.push_back(p.pos);
+    if (p.trail.size() > p.maxTrailLength) {
+        p.trail.erase(p.trail.begin());
+    }
+
     Vec2 a = gravity(p.pos, G, M); // create the acceleration vector
     p.vel.x += a.x * dt; // add one unit of acceleration to velocities
     p.vel.y += a.y * dt;
     p.pos.x += p.vel.x * dt; // update positions using velocity
     p.pos.y += p.vel.y * dt;
+
+    p.temp = calcTemp(p);
+}
+
+
+// to do: get colour based on temp and distance to blackhole
+
+Vec2 getParticleColour(float temp, float dist) {
+    Vec2 colour;
+    
+    // Accretion disk effect: particles close to black hole are very hot and bright
+    if (dist < accretionDiskRadius) {
+        // Very hot accretion disk particles: white to blue
+        float diskFactor = 1.0f - (dist / accretionDiskRadius);
+        colour.x = 0.8f + diskFactor * 0.2f;  // Red component
+        colour.y = 0.9f + diskFactor * 0.1f;  // Green component
+        return colour; // Blue will be 1.0 in shader
+    }
+    
+    // Normal particles: color based on temperature
+    if (temp > 2.0f) {
+        // Very hot: white/blue
+        colour.x = 1.0f;
+        colour.y = 1.0f;
+    } else if (temp > 1.0f) {
+        // Hot: yellow/white
+        colour.x = 1.0f;
+        colour.y = 1.0f;
+    } else {
+        // Cool: red/orange
+        colour.x = 1.0f;
+        colour.y = 0.3f + temp * 0.4f;
+    }
+    
+    return colour;
 }
 
 // Shader sources
@@ -55,16 +111,53 @@ void main() {
     float x = (aPos.x / uScreenWidth) * 2.0 - 1.0;
     float y = (aPos.y / uScreenHeight) * 2.0 - 1.0;
     gl_Position = vec4(x, y, 0.0, 1.0);
-    gl_PointSize = 2.0;
+    gl_PointSize = 10.0;
 }
 )";
 
 const char* fragmentShaderSrc = R"(
 #version 330 core
+out vec4 FragColor;                          // Output color
+uniform vec3 uColor;                         // Input color from CPU
+
+void main() {
+    // Create circular particles instead of square points
+    vec2 coord = gl_PointCoord - vec2(0.5);
+    float dist = length(coord);
+    
+    // Smooth falloff for glowing effect
+    float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
+    
+    FragColor = vec4(uColor, alpha);         // Use calculated alpha for glow
+}
+)";
+
+// Trail vertex shader for rendering particle trails
+const char* trailVertexShaderSrc = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in float aAlpha;       // Trail fade factor
+uniform float uScreenWidth;
+uniform float uScreenHeight;
+out float vAlpha;
+
+void main() {
+    float x = (aPos.x / uScreenWidth) * 2.0 - 1.0;
+    float y = (aPos.y / uScreenHeight) * 2.0 - 1.0;
+    gl_Position = vec4(x, y, 0.0, 1.0);
+    vAlpha = aAlpha;
+}
+)";
+
+// Trail fragment shader with fading effect
+const char* trailFragmentShaderSrc = R"(
+#version 330 core
+in float vAlpha;
 out vec4 FragColor;
 uniform vec3 uColor;
+
 void main() {
-    FragColor = vec4(uColor, 1.0);
+    FragColor = vec4(uColor * 0.8, vAlpha * 0.3);  // Dimmer, fading trails
 }
 )";
 
@@ -114,6 +207,12 @@ int main() {
         return -1;
     }
 
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    
+    // Enable blending for transparency effects
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     // Initialize particles
     vector<Particle> particles;
     for (int i = 0; i < numParticles; ++i) {
@@ -125,69 +224,151 @@ int main() {
         float xVel = -1 * sin(angle) * orbitalSpeed;
         float yVel = cos(angle) * orbitalSpeed;
 
-        particles.push_back({ 
-            { width/2 + radius * cos(angle), height/2 + radius * sin(angle) }, 
-            {xVel, yVel} 
-        });
+        Particle p;
+        p.pos = { width/2 + radius * cos(angle), height/2 + radius * sin(angle) };
+        p.vel = { xVel, yVel };
+        p.temp = 1.0f;
+
+        particles.push_back(p);
     }
 
-    // Create VBO and VAO
-    GLuint VBO, VAO;
-    glGenBuffers(1, &VBO);
-    glGenVertexArrays(1, &VAO);
-
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    // Set up OpenGL buffers for rendering particles
+    GLuint particleVBO, particleVAO;
+    glGenBuffers(1, &particleVBO);
+    glGenVertexArrays(1, &particleVAO);
+    
+    // Configure particle vertex array object
+    glBindVertexArray(particleVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, particleVBO);
     glBufferData(GL_ARRAY_BUFFER, numParticles * 2 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
-
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-
-    GLuint shaderProgram = createProgram(vertexShaderSrc, fragmentShaderSrc);
-    glUseProgram(shaderProgram);
-
-    GLint colorLoc = glGetUniformLocation(shaderProgram, "uColor");
-    GLint widthLoc = glGetUniformLocation(shaderProgram, "uScreenWidth");
-    GLint heightLoc = glGetUniformLocation(shaderProgram, "uScreenHeight");
-
-    glUniform1f(widthLoc, (float)width);
-    glUniform1f(heightLoc, (float)height);
+    
+    // Set up OpenGL buffers for rendering trails
+    GLuint trailVBO, trailVAO;
+    glGenBuffers(1, &trailVBO);
+    glGenVertexArrays(1, &trailVAO);
+    
+    // Configure trail vertex array object (position + alpha for fading)
+    glBindVertexArray(trailVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, trailVBO);
+    // Each trail point has 3 floats: x, y, alpha
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    
+    // Create shader programs
+    GLuint particleProgram = createProgram(vertexShaderSrc, fragmentShaderSrc);
+    GLuint trailProgram = createProgram(trailVertexShaderSrc, trailFragmentShaderSrc);
+    
+    // Get uniform locations for particle shader
+    GLint particleColorLoc = glGetUniformLocation(particleProgram, "uColor");
+    GLint particleWidthLoc = glGetUniformLocation(particleProgram, "uScreenWidth");
+    GLint particleHeightLoc = glGetUniformLocation(particleProgram, "uScreenHeight");
+    
+    // Get uniform locations for trail shader
+    GLint trailColorLoc = glGetUniformLocation(trailProgram, "uColor");
+    GLint trailWidthLoc = glGetUniformLocation(trailProgram, "uScreenWidth");
+    GLint trailHeightLoc = glGetUniformLocation(trailProgram, "uScreenHeight");
+    
+    // Set screen dimensions in both shaders
+    glUseProgram(particleProgram);
+    glUniform1f(particleWidthLoc, (float)width);
+    glUniform1f(particleHeightLoc, (float)height);
+    
+    glUseProgram(trailProgram);
+    glUniform1f(trailWidthLoc, (float)width);
+    glUniform1f(trailHeightLoc, (float)height);
 
     // Main loop
     while (!glfwWindowShouldClose(window)) {
-        glClearColor(0, 0, 0, 1);
+        // Clear screen to black
+        glClearColor(0.05f, 0.05f, 0.1f, 1.0f);  // Dark blue background for space effect
         glClear(GL_COLOR_BUFFER_BIT);
-
-        // Update particle positions
-        vector<float> data(numParticles * 2);
+        
+        // Update all particle positions using physics simulation
+        vector<float> particleData(numParticles * 2);  // Array for particle positions
+        vector<float> trailData;                        // Dynamic array for all trail points
+        
         for (int i = 0; i < numParticles; ++i) {
-            updateParticle(particles[i], 0.01f, G, M);
-            data[2*i] = particles[i].pos.x;
-            data[2*i+1] = particles[i].pos.y;
+            // Update particle physics (smaller timestep for stability)
+            updateParticle(particles[i], 0.008f, G, M);
+            
+            // Store particle position data for rendering
+            particleData[2*i] = particles[i].pos.x;     // X coordinate
+            particleData[2*i+1] = particles[i].pos.y;   // Y coordinate
+            
+            // Add trail points to trail data array
+            for (size_t j = 0; j < particles[i].trail.size(); ++j) {
+                trailData.push_back(particles[i].trail[j].x);  // X position
+                trailData.push_back(particles[i].trail[j].y);  // Y position
+                
+                // Calculate alpha for fading effect (newer points are more opaque)
+                float alpha = (float)j / particles[i].trail.size();
+                trailData.push_back(alpha);
+            }
+        }
+        
+        // Render particle trails first (so they appear behind particles)
+        if (!trailData.empty()) {
+            glUseProgram(trailProgram);
+            glBindVertexArray(trailVAO);
+            glBindBuffer(GL_ARRAY_BUFFER, trailVBO);
+            
+            // Upload trail data to GPU
+            glBufferData(GL_ARRAY_BUFFER, trailData.size() * sizeof(float), 
+                        trailData.data(), GL_DYNAMIC_DRAW);
+            
+            // Set trail colour (dim white)
+            glUniform3f(trailColorLoc, 0.8f, 0.8f, 1.0f);
+            
+            // Draw all trail points as lines
+            glDrawArrays(GL_POINTS, 0, trailData.size() / 3);
+        }
+        
+        // Render particles with temperature-based coloring
+        glUseProgram(particleProgram);
+        glBindVertexArray(particleVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, particleVBO);
+        
+        // Upload particle positions to GPU
+        glBufferSubData(GL_ARRAY_BUFFER, 0, particleData.size() * sizeof(float), particleData.data());
+        
+        // Draw each particle with individual color based on temperature and distance
+        for (int i = 0; i < numParticles; ++i) {
+            float distanceFromCenter = sqrt((particles[i].pos.x - centerX) * (particles[i].pos.x - centerX) + 
+                                           (particles[i].pos.y - centerY) * (particles[i].pos.y - centerY));
+            
+            Vec2 colour = getParticleColour(particles[i].temp, distanceFromCenter);
+            
+            // Special bright coloring for accretion disk particles
+            if (distanceFromCenter < accretionDiskRadius) {
+                glUniform3f(particleColorLoc, colour.x, colour.y, 1.0f);  // Bright blue-white
+            } else {
+                glUniform3f(particleColorLoc, colour.x, colour.y, 0.2f);  // Apply calculated color
+            }
+            
+            // Draw single particle
+            glDrawArrays(GL_POINTS, i, 1);
         }
 
-        // Upload data to GPU
-        glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, data.size() * sizeof(float), data.data());
-
-        // Draw particles
-        glUniform3f(colorLoc, 1.0f, 1.0f, 1.0f);
-        glBindVertexArray(VAO);
-        glDrawArrays(GL_POINTS, 0, numParticles);
-
-        // Draw black hole at center
-        float bh[2] = { width/2.0f, height/2.0f };
-        glBufferSubData(GL_ARRAY_BUFFER, 0, 2 * sizeof(float), bh);
-        glUniform3f(colorLoc, 1.0f, 0.0f, 0.0f);
+        float blackHole[2] = { centerX, centerY };
+        glBufferSubData(GL_ARRAY_BUFFER, 0, 2 * sizeof(float), blackHole);
+        glUniform3f(particleColorLoc, 0.8f, 0.2f, 0.0f);  // Orange-red black hole
         glDrawArrays(GL_POINTS, 0, 1);
-
+        
+        // Present rendered frame and handle window events
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
-    glDeleteBuffers(1, &VBO);
-    glDeleteVertexArrays(1, &VAO);
-    glDeleteProgram(shaderProgram);
+    glDeleteBuffers(1, &particleVBO);
+    glDeleteVertexArrays(1, &particleVAO);
+    glDeleteBuffers(1, &trailVBO);
+    glDeleteVertexArrays(1, &trailVAO);
+    glDeleteProgram(particleProgram);
+    glDeleteProgram(trailProgram);
 
     glfwDestroyWindow(window);
     glfwTerminate();
