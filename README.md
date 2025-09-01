@@ -1,2 +1,2 @@
-# BlackHoleSim
-A simple blackhole simulation written in CPP
+# OrbitSim
+A simple orbit simulation written in CPP
